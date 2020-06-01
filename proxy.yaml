@@ -45,7 +45,7 @@ metadata:
     annotations:
         minProxies: "1"
         maxProxies: "100"
-        maxRequests: "20"
+        maxRequests: "1000"
         maxLoadFactor: "0.5"
         proxyTimeout: "100"
         idleTimeout: "10"
@@ -65,7 +65,7 @@ spec:
             terminationGracePeriodSeconds: 0
             containers:
             - name: proxy
-              image: REPO/proxy
+              image: jasonpet/proxy:latest
               ports:
               - containerPort: 80
                 protocol: TCP
