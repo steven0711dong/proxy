@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -38,6 +39,8 @@ var ProxyStatefulSet = os.Getenv("POD_STATEFULSET")
 var ProxyOrdinal = getProxyOrdinal(ProxyName)
 
 var kubeClient *kubernetes.Clientset
+
+var httpClient http.Client
 
 // Info of StatefulSet
 var proxies struct {
@@ -126,6 +129,8 @@ func scaleStatefulSet(newScale int) {
 	if int64(newScale) == proxies.Count || int64(newScale) < config.MinProxies {
 		return
 	}
+	location, _ := time.LoadLocation("EST")
+	debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
 
 	retries := 5
 	for retry := 0; retry < retries; retry++ {
@@ -204,7 +209,6 @@ func writeProxyMetrics(w http.ResponseWriter, proxyStatus int, Id string) {
 
 	// If we have no more free requests based on load factor, try to scale up
 	if free <= 0 {
-		debugPrint(1, "at %s, starts scaling for: %s", time.Now().String(), string(ProxyOrdinal))
 		go scaleUp()
 	}
 
@@ -352,8 +356,6 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			debugPrint(3, "[<] Active requests: %v", state.ActiveRequests)
 		}()
 
-		// Do the request
-		var httpClient http.Client
 		if insecureSkipVerify {
 			httpClient.Transport = &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -921,8 +923,24 @@ func printStats() {
 }
 
 func main() {
+	setupclient()
 	startWatcher()
 	setupIdleShutdown()
 	printStats()
 	startServer()
+}
+
+func setupclient() {
+	netHTTPTransport := &http.Transport{
+		MaxIdleConns:        2000, //2000
+		MaxIdleConnsPerHost: 2000, //2000  default 2
+		MaxConnsPerHost:     100,  //100
+		IdleConnTimeout:     90,   //90s
+		TLSHandshakeTimeout: 10,   //10s
+		DialContext: (&net.Dialer{
+			Timeout:   30, //30s
+			KeepAlive: 90,
+		}).DialContext,
+	}
+	httpClient.Transport = netHTTPTransport
 }
