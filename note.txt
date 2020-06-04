@@ -1,0 +1,16 @@
+if timeout:
+Proxy-Status: 202 StatusCode: 202 
+
+if returned within timeout but no error:
+Proxy-Status: 200 StatusCode: 200 no retry 
+                              202 no retry 
+                              429 retry 
+
+if requests are exceeding pre-set maximum requests: 
+Proxy-Status: 429 StatusCode: 429 retry 
+
+if returned within timeout but error exists: 
+Proxy-Status: 500 StatusCode: 500 and write error into the body 
+
+if unable to read request or unable to create proxyRequest 
+Proxy-Status: 500 StatusCode: 500 
