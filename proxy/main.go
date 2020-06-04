@@ -340,7 +340,7 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 	var requestResponse *http.Response
 	var requestResponseBody []byte
 	var requestError error
-
+	debugPrint(1, "Close: %t Connection: %s", proxyRequest.Close, proxyRequest.Header.Get("Connection"))
 	// Start the request
 	go func() {
 		defer func() {
@@ -372,6 +372,10 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			} else {
 				requestError = err
 				debugPrint(2, "response nil? %t ", requestResponse == nil)
+				if requestResponse != nil && requestResponse.Header != nil {
+					debugPrint(2, "Keep alive? %s ", requestResponse.Header.Get("Connection"))
+				}
+
 				debugPrint(2, "[!] Failed to read request to %v response body from: %v", proxyRequest.URL.String(), requestError)
 			}
 		} else {
