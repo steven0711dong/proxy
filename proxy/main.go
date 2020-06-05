@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"log"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -39,8 +38,6 @@ var ProxyStatefulSet = os.Getenv("POD_STATEFULSET")
 var ProxyOrdinal = getProxyOrdinal(ProxyName)
 
 var kubeClient *kubernetes.Clientset
-
-var httpClient http.Client
 
 // Info of StatefulSet
 var proxies struct {
@@ -129,8 +126,8 @@ func scaleStatefulSet(newScale int) {
 	if int64(newScale) == proxies.Count || int64(newScale) < config.MinProxies {
 		return
 	}
-	location, _ := time.LoadLocation("EST")
-	debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
+	// location, _ := time.LoadLocation("EST")
+	// debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
 
 	retries := 5
 	for retry := 0; retry < retries; retry++ {
@@ -344,7 +341,6 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 	var requestResponse *http.Response
 	var requestResponseBody []byte
 	var requestError error
-	debugPrint(1, "Close: %t Connection: %s", proxyRequest.Close, proxyRequest.Header.Get("Connection"))
 	// Start the request
 	go func() {
 		defer func() {
@@ -356,6 +352,16 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			debugPrint(3, "[<] Active requests: %v", state.ActiveRequests)
 		}()
 
+		// Do the request
+		var httpClient http.Client
+		netHTTPTransport := &http.Transport{
+			MaxIdleConns:        2000, //2000
+			MaxIdleConnsPerHost: 2000, //2000  default 2
+			MaxConnsPerHost:     200,  //100
+			IdleConnTimeout:     90,   //90s
+			TLSHandshakeTimeout: 10,   //10s
+		}
+		httpClient.Transport = netHTTPTransport
 		if insecureSkipVerify {
 			httpClient.Transport = &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -923,24 +929,8 @@ func printStats() {
 }
 
 func main() {
-	setupclient()
 	startWatcher()
 	setupIdleShutdown()
 	printStats()
 	startServer()
-}
-
-func setupclient() {
-	netHTTPTransport := &http.Transport{
-		MaxIdleConns:        2000, //2000
-		MaxIdleConnsPerHost: 2000, //2000  default 2
-		MaxConnsPerHost:     100,  //100
-		IdleConnTimeout:     90,   //90s
-		TLSHandshakeTimeout: 10,   //10s
-		DialContext: (&net.Dialer{
-			Timeout:   30, //30s
-			KeepAlive: 90,
-		}).DialContext,
-	}
-	httpClient.Transport = netHTTPTransport
 }
