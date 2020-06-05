@@ -126,8 +126,8 @@ func scaleStatefulSet(newScale int) {
 	if int64(newScale) == proxies.Count || int64(newScale) < config.MinProxies {
 		return
 	}
-	// location, _ := time.LoadLocation("EST")
-	// debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
+	//location, _ := time.LoadLocation("EST")
+	//debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
 
 	retries := 5
 	for retry := 0; retry < retries; retry++ {
@@ -341,6 +341,7 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 	var requestResponse *http.Response
 	var requestResponseBody []byte
 	var requestError error
+	debugPrint(1, "Close: %t Connection: %s", proxyRequest.Close, proxyRequest.Header.Get("Connection"))
 	// Start the request
 	go func() {
 		defer func() {
@@ -357,7 +358,7 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 		netHTTPTransport := &http.Transport{
 			MaxIdleConns:        2000, //2000
 			MaxIdleConnsPerHost: 2000, //2000  default 2
-			MaxConnsPerHost:     200,  //100
+			MaxConnsPerHost:     100,  //100
 			IdleConnTimeout:     90,   //90s
 			TLSHandshakeTimeout: 10,   //10s
 		}
