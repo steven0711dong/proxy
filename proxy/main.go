@@ -107,6 +107,24 @@ var config struct {
 	}
 }
 
+var conpool = ConcurrencyPool{concurrent: make(chan bool, 1000)}
+
+type ConcurrencyPool struct {
+	concurrent chan bool
+}
+
+func (c ConcurrencyPool) Use() {
+	c.concurrent <- true
+}
+
+func (c ConcurrencyPool) Unuse() {
+	<-c.concurrent
+}
+
+func (c ConcurrencyPool) Inuse() int {
+	return len(c.concurrent)
+}
+
 func debugPrint(level int, format string, args ...interface{}) {
 	if int64(level) > config.DebugLevel {
 		return
@@ -348,7 +366,7 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 		defer func() {
 			// Restart the timer
 			resetIdleShutdown()
-
+			conpool.Unuse()
 			// Decrement the current number of active requests
 			atomic.AddInt64(&state.ActiveRequests, -1)
 			debugPrint(3, "[<] Active requests: %v", state.ActiveRequests)
@@ -359,7 +377,7 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			}
 		}
-
+		conpool.Use()
 		// Do the request
 		requestResponse, requestError = httpClient.Do(proxyRequest)
 
@@ -919,7 +937,7 @@ func configClient() {
 	netHTTPTransport := &http.Transport{
 		MaxIdleConns:        2000,             //2000
 		MaxIdleConnsPerHost: 2000,             //2000  default 2
-		MaxConnsPerHost:     100,              //100
+		MaxConnsPerHost:     150,              //100
 		IdleConnTimeout:     time.Second * 90, //90s
 		TLSHandshakeTimeout: time.Second * 10, //10s
 	}
