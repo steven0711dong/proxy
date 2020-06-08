@@ -39,6 +39,8 @@ var ProxyOrdinal = getProxyOrdinal(ProxyName)
 
 var kubeClient *kubernetes.Clientset
 
+var httpClient *http.Client
+
 // Info of StatefulSet
 var proxies struct {
 	Count   int64
@@ -341,7 +343,6 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 	var requestResponse *http.Response
 	var requestResponseBody []byte
 	var requestError error
-	debugPrint(1, "Close: %t Connection: %s", proxyRequest.Close, proxyRequest.Header.Get("Connection"))
 	// Start the request
 	go func() {
 		defer func() {
@@ -353,38 +354,23 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			debugPrint(3, "[<] Active requests: %v", state.ActiveRequests)
 		}()
 
-		// Do the request
-		var httpClient http.Client
-		netHTTPTransport := &http.Transport{
-			MaxIdleConns:        2000, //2000
-			MaxIdleConnsPerHost: 2000, //2000  default 2
-			MaxConnsPerHost:     100,  //100
-			IdleConnTimeout:     90,   //90s
-			TLSHandshakeTimeout: 10,   //10s
-		}
-		httpClient.Transport = netHTTPTransport
 		if insecureSkipVerify {
 			httpClient.Transport = &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			}
 		}
 
+		// Do the request
 		requestResponse, requestError = httpClient.Do(proxyRequest)
 
 		// Was there no error?
 		if requestError == nil {
 			defer requestResponse.Body.Close()
-
 			// Read the body
 			if body, err := ioutil.ReadAll(requestResponse.Body); err == nil {
 				requestResponseBody = body
 			} else {
 				requestError = err
-				debugPrint(2, "response nil? %t ", requestResponse == nil)
-				if requestResponse != nil && requestResponse.Header != nil {
-					debugPrint(2, "Keep alive? %s ", requestResponse.Header.Get("Connection"))
-				}
-
 				debugPrint(2, "[!] Failed to read request to %v response body from: %v", proxyRequest.URL.String(), requestError)
 			}
 		} else {
@@ -929,9 +915,22 @@ func printStats() {
 	}()
 }
 
+func configClient() {
+	netHTTPTransport := &http.Transport{
+		MaxIdleConns:        2000,             //2000
+		MaxIdleConnsPerHost: 2000,             //2000  default 2
+		MaxConnsPerHost:     100,              //100
+		IdleConnTimeout:     time.Second * 90, //90s
+		TLSHandshakeTimeout: time.Second * 10, //10s
+	}
+
+	httpClient.Transport = netHTTPTransport
+}
+
 func main() {
 	startWatcher()
 	setupIdleShutdown()
 	printStats()
+	configClient()
 	startServer()
 }
