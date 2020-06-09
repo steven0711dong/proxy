@@ -43,12 +43,12 @@ metadata:
     labels:
         component: proxy
     annotations:
-        minProxies: "1"
+        minProxies: "2"
         maxProxies: "100"
-        maxRequests: "1000"
+        maxRequests: "3500"
         maxLoadFactor: "0.5"
         proxyTimeout: "100"
-        idleTimeout: "10"
+        idleTimeout: "100"
         debugLevel: "1"
 spec:
     selector:
@@ -65,7 +65,7 @@ spec:
             terminationGracePeriodSeconds: 0
             containers:
             - name: proxy
-              image: jasonpet/proxy:latest
+              image: stevendongatibm/proxy:14
               ports:
               - containerPort: 80
                 protocol: TCP
