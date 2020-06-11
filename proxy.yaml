@@ -65,7 +65,7 @@ spec:
             terminationGracePeriodSeconds: 0
             containers:
             - name: proxy
-              image: stevendongatibm/proxy:14
+              image: stevendongatibm/proxy:30
               ports:
               - containerPort: 80
                 protocol: TCP
