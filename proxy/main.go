@@ -91,6 +91,7 @@ type SinkStatusMap struct {
 	LastTime time.Time
 }
 
+var doWeHaveInsecureVerifyTrue = false
 var SinkStatusMp = SinkStatusMap{Mp: make(map[string]int), LastTime: time.Now()}
 
 // Config from annotations (+ readiness probe)
@@ -373,6 +374,7 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 		}()
 
 		if insecureSkipVerify {
+			doWeHaveInsecureVerifyTrue = true
 			httpClient.Transport = &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			}
@@ -876,11 +878,12 @@ func printStats() {
 			// 	int(float64(config.MaxRequests)*config.MaxLoadFactor),
 			// 	state.DenyCounter,
 			// 	state.ActiveRequests)
-			debugPrint(1, "[+] P:%-3v Received:%d 202s:%d 429s:%d",
+			debugPrint(1, "[+] P:%-3v Received:%d 202s:%d 429s:%d insecureVerify:%t",
 				proxies.Count,
 				NumReceived.Number,
 				Num202Response.Number,
-				Num429Received.Number)
+				Num429Received.Number,
+				doWeHaveInsecureVerifyTrue)
 
 			SinkStatusMp.Mu.Lock()
 			for k, v := range SinkStatusMp.Mp {
@@ -965,6 +968,6 @@ func main() {
 	setupIdleShutdown()
 	printStats()
 	configClient()
-	startServer()
 	startRedis()
+	startServer()
 }

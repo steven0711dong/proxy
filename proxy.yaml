@@ -45,10 +45,10 @@ metadata:
     annotations:
         minProxies: "2"
         maxProxies: "100"
-        maxRequests: "3500"
-        maxLoadFactor: "0.5"
+        maxRequests: "2000"
+        maxLoadFactor: "0.3"
         proxyTimeout: "100"
-        idleTimeout: "100"
+        idleTimeout: "20"
         debugLevel: "1"
 spec:
     selector:
@@ -65,7 +65,7 @@ spec:
             terminationGracePeriodSeconds: 0
             containers:
             - name: proxy
-              image: stevendongatibm/proxy:30
+              image: stevendongatibm/proxy:20
               ports:
               - containerPort: 80
                 protocol: TCP
