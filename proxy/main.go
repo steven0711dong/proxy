@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gomodule/redigo/redis"
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +41,8 @@ var ProxyOrdinal = getProxyOrdinal(ProxyName)
 var kubeClient *kubernetes.Clientset
 
 var httpClient http.Client
+
+var pool redis.Pool
 
 // Info of StatefulSet
 var proxies struct {
@@ -107,21 +110,21 @@ var config struct {
 	}
 }
 
-// var conpool = ConcurrencyPool{concurrent: make(chan bool, 1000)}
+// var conpool = concurrencyPool{concurrent: make(chan bool, 1000)}
 
-// type ConcurrencyPool struct {
+// type concurrencyPool struct {
 // 	concurrent chan bool
 // }
 
-// func (c ConcurrencyPool) Use() {
+// func (c concurrencyPool) use() {
 // 	c.concurrent <- true
 // }
 
-// func (c ConcurrencyPool) Unuse() {
+// func (c concurrencyPool) unuse() {
 // 	<-c.concurrent
 // }
 
-// func (c ConcurrencyPool) Inuse() int {
+// func (c concurrencyPool) inuse() int {
 // 	return len(c.concurrent)
 // }
 
@@ -146,6 +149,8 @@ func scaleStatefulSet(newScale int) {
 	if int64(newScale) == proxies.Count || int64(newScale) < config.MinProxies {
 		return
 	}
+
+	startSendingMetrics()
 	//location, _ := time.LoadLocation("EST")
 	//debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
 
@@ -205,7 +210,7 @@ func scaleDown() bool {
 }
 
 // Writes the current proxy's metrics to response writer
-func writeProxyMetrics(w http.ResponseWriter, proxyStatus int, Id string) {
+func writeProxyMetrics(w http.ResponseWriter, proxyStatus int) {
 	// if proxyStatus == http.StatusTooManyRequests {
 	// 	atomic.AddUint64(&state.DenyCounter, 1)
 	// }
@@ -213,9 +218,6 @@ func writeProxyMetrics(w http.ResponseWriter, proxyStatus int, Id string) {
 	if proxyStatus == http.StatusTooManyRequests {
 		go func() {
 			Num429Received.Mu.Lock()
-			if time.Since(Num429Received.LastTime) >= time.Duration(time.Minute*2) {
-				Num429Received.Number = 0
-			}
 			Num429Received.Number++
 			Num429Received.LastTime = time.Now()
 			Num429Received.Mu.Unlock()
@@ -233,7 +235,6 @@ func writeProxyMetrics(w http.ResponseWriter, proxyStatus int, Id string) {
 	w.Header().Set("Proxy-Free", strconv.Itoa(free))
 	w.Header().Set("Proxy-Ordinal", strconv.Itoa(int(ProxyOrdinal)))
 	w.Header().Set("Proxy-Status", strconv.Itoa(proxyStatus))
-	w.Header().Set("KafkaMsgNotificationId", Id)
 
 	proxies.List.RLock()
 	w.Header().Set("Proxy-Version", proxies.List.Version)
@@ -245,9 +246,8 @@ func writeProxyMetrics(w http.ResponseWriter, proxyStatus int, Id string) {
 func httpHandler(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
-	kafkaMsgId := strings.TrimSpace(r.Header.Get("KafkaMsgNotificationId"))
 	// Handle ensure requests
-	if handleEnsureRequest(w, r, kafkaMsgId) {
+	if handleEnsureRequest(w, r) {
 		return
 	}
 
@@ -257,14 +257,11 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	// Is there no Forward-To header?
 	if forwardTo == "" {
 		// If so, return metrics.
-		writeProxyMetrics(w, http.StatusOK, kafkaMsgId)
+		writeProxyMetrics(w, http.StatusOK)
 		return
 	} else {
 		go func() {
 			NumReceived.Mu.Lock()
-			if time.Since(NumReceived.LastTime) >= time.Duration(time.Minute*2) {
-				NumReceived.Number = 0
-			}
 			NumReceived.Number++
 			NumReceived.LastTime = time.Now()
 			NumReceived.Mu.Unlock()
@@ -274,7 +271,7 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	// Have we fully maxed out?
 	if state.ActiveRequests >= int64(config.MaxRequests) {
 		// If so, deny the request and return metrics
-		writeProxyMetrics(w, http.StatusTooManyRequests, kafkaMsgId)
+		writeProxyMetrics(w, http.StatusTooManyRequests)
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
@@ -283,13 +280,14 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	state.ActiveRequestsMu.Lock()
 	if state.ActiveRequests >= int64(config.MaxRequests) {
 		state.ActiveRequestsMu.Unlock()
-		writeProxyMetrics(w, http.StatusTooManyRequests, kafkaMsgId)
+		writeProxyMetrics(w, http.StatusTooManyRequests)
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
 
 	// Increase the active request count
 	atomic.AddInt64(&state.ActiveRequests, 1)
+	//conpool.use()
 	debugPrint(3, "[>] Active Requests: %v", state.ActiveRequests)
 
 	state.ActiveRequestsMu.Unlock()
@@ -301,7 +299,8 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		atomic.AddInt64(&state.ActiveRequests, -1)
-		writeProxyMetrics(w, http.StatusInternalServerError, kafkaMsgId)
+		//conpool.unuse()
+		writeProxyMetrics(w, http.StatusInternalServerError)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -310,7 +309,8 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	proxyRequest, err := http.NewRequest(r.Method, forwardTo, bytes.NewReader(body))
 	if err != nil {
 		atomic.AddInt64(&state.ActiveRequests, -1)
-		writeProxyMetrics(w, http.StatusInternalServerError, kafkaMsgId)
+		//conpool.unuse()
+		writeProxyMetrics(w, http.StatusInternalServerError)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -319,11 +319,11 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 	proxyRequest.Header = r.Header
 
 	// Do the actual request
-	doAsyncProxyRequest(w, proxyRequest, strings.ToLower(strings.TrimSpace(r.Header.Get("Insecure-Skip-Verify"))) == "true", kafkaMsgId)
+	doAsyncProxyRequest(w, proxyRequest, strings.ToLower(strings.TrimSpace(r.Header.Get("Insecure-Skip-Verify"))) == "true")
 }
 
 // Handles an ensure request if it exists, returns false if none exists
-func handleEnsureRequest(w http.ResponseWriter, r *http.Request, kafkaMsgId string) bool {
+func handleEnsureRequest(w http.ResponseWriter, r *http.Request) bool {
 	ensure := strings.TrimSpace(r.Header.Get("Ensure-Requests"))
 	if ensure == "" {
 		return false
@@ -332,7 +332,7 @@ func handleEnsureRequest(w http.ResponseWriter, r *http.Request, kafkaMsgId stri
 	// Ensure-Requests are the number of requests to expect
 	ensureRequests, err := strconv.ParseUint(ensure, 10, 64)
 	if err != nil {
-		writeProxyMetrics(w, http.StatusInternalServerError, kafkaMsgId)
+		writeProxyMetrics(w, http.StatusInternalServerError)
 		return true
 	}
 
@@ -351,12 +351,12 @@ func handleEnsureRequest(w http.ResponseWriter, r *http.Request, kafkaMsgId stri
 		proxies.CountMu.Unlock()
 	}
 
-	writeProxyMetrics(w, http.StatusOK, kafkaMsgId)
+	writeProxyMetrics(w, http.StatusOK)
 	return true
 }
 
 // Does an async proxy request and returns the status code if returned before the timeout
-func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, insecureSkipVerify bool, kafkaMsgId string) {
+func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, insecureSkipVerify bool) {
 	timeoutChan := make(chan bool, 2)
 	var requestResponse *http.Response
 	var requestResponseBody []byte
@@ -366,9 +366,9 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 		defer func() {
 			// Restart the timer
 			resetIdleShutdown()
-			//conpool.Unuse()
 			// Decrement the current number of active requests
 			atomic.AddInt64(&state.ActiveRequests, -1)
+			//conpool.unuse()
 			debugPrint(3, "[<] Active requests: %v", state.ActiveRequests)
 		}()
 
@@ -377,7 +377,6 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			}
 		}
-		//conpool.Use()
 		// Do the request
 		requestResponse, requestError = httpClient.Do(proxyRequest)
 
@@ -393,20 +392,17 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			}
 		} else {
 			errStr := requestError.Error()
-			if errStr[len(errStr)-3:] == "EOF" {
-				SinkStatusMp.Mu.Lock()
-				if time.Since(SinkStatusMp.LastTime) >= time.Duration(time.Minute*2) {
-					SinkStatusMp.Mp = make(map[string]int)
-				}
-				if _, k := SinkStatusMp.Mp["EOF"]; k {
-					SinkStatusMp.LastTime = time.Now()
-					SinkStatusMp.Mp["EOF"]++
-				} else {
-					SinkStatusMp.LastTime = time.Now()
-					SinkStatusMp.Mp["EOF"] = 1
-				}
-				SinkStatusMp.Mu.Unlock()
+			l := len(errStr)
+			errS := errStr[l-13:]
+			SinkStatusMp.Mu.Lock()
+			if _, k := SinkStatusMp.Mp[errS]; k {
+				SinkStatusMp.LastTime = time.Now()
+				SinkStatusMp.Mp[errS]++
+			} else {
+				SinkStatusMp.LastTime = time.Now()
+				SinkStatusMp.Mp[errS] = 1
 			}
+			SinkStatusMp.Mu.Unlock()
 			debugPrint(2, "[!] Request to %v failed %v", proxyRequest.URL.String(), requestError)
 		}
 
@@ -423,14 +419,11 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 
 	if <-timeoutChan {
 		Num202Response.Mu.Lock()
-		if time.Since(Num202Response.LastTime) >= time.Duration(2*time.Minute) {
-			Num202Response.Number = 0
-		}
 		Num202Response.LastTime = time.Now()
 		Num202Response.Number++
 		Num202Response.Mu.Unlock()
 		// We did timeout, request still being processed
-		writeProxyMetrics(w, http.StatusAccepted, kafkaMsgId)
+		writeProxyMetrics(w, http.StatusAccepted)
 		w.WriteHeader(http.StatusAccepted)
 	} else {
 		// We did not timeout, try to copy the response back
@@ -450,32 +443,6 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			go func() {
 				SinkStatusMp.Mu.Lock()
 				defer SinkStatusMp.Mu.Unlock()
-				if time.Since(SinkStatusMp.LastTime) >= time.Duration(time.Minute*2) {
-					SinkStatusMp.Mp = make(map[string]int)
-				}
-				if requestError != nil {
-					errStr := requestError.Error()
-					fmt.Println("printing out error: ", errStr)
-					lent := len(errStr)
-					if errStr[lent-40:lent] == "Timeout exceeded while awaiting headers)" {
-						if _, ok := SinkStatusMp.Mp["queue proxy error"]; ok {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["queue proxy error"]++
-						} else {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["queue proxy error"] = 1
-						}
-					} else {
-						if _, ok := SinkStatusMp.Mp["other errors"]; ok {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["other errors"]++
-						} else {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["other errors"] = 1
-						}
-					}
-				}
-
 				if requestResponse != nil {
 					if _, exist := SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]; exist {
 						SinkStatusMp.LastTime = time.Now()
@@ -493,40 +460,25 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 						SinkStatusMp.Mp["empty response"] = 1
 					}
 				}
-
 			}()
 
-			writeProxyMetrics(w, http.StatusOK, kafkaMsgId)
+			writeProxyMetrics(w, http.StatusOK)
 			w.WriteHeader(requestResponse.StatusCode)
 			w.Write(requestResponseBody)
 		} else {
+			//error happened
 			go func() {
 				SinkStatusMp.Mu.Lock()
 				defer SinkStatusMp.Mu.Unlock()
-				if time.Since(SinkStatusMp.LastTime) >= time.Duration(time.Minute*2) {
-					SinkStatusMp.Mp = make(map[string]int)
-				}
-				if requestError != nil {
-					errStr := requestError.Error()
-					fmt.Println("printing out error: ", errStr)
-					lent := len(errStr)
-					if errStr[lent-40:lent] == "Timeout exceeded while awaiting headers)" {
-						if _, ok := SinkStatusMp.Mp["queue proxy error"]; ok {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["queue proxy error"]++
-						} else {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["queue proxy error"] = 1
-						}
-					} else {
-						if _, ok := SinkStatusMp.Mp["other errors"]; ok {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["other errors"]++
-						} else {
-							SinkStatusMp.LastTime = time.Now()
-							SinkStatusMp.Mp["other errors"] = 1
-						}
-					}
+				errStr := requestError.Error()
+				l := len(errStr)
+				errS := errStr[l-13:]
+				if _, ok := SinkStatusMp.Mp[errS]; ok {
+					SinkStatusMp.LastTime = time.Now()
+					SinkStatusMp.Mp[errS]++
+				} else {
+					SinkStatusMp.LastTime = time.Now()
+					SinkStatusMp.Mp[errS] = 1
 				}
 
 				if requestResponse != nil {
@@ -546,11 +498,10 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 						SinkStatusMp.Mp["empty response"] = 1
 					}
 				}
-
 			}()
 
 			// The request entirely failed
-			writeProxyMetrics(w, http.StatusAccepted, kafkaMsgId)
+			writeProxyMetrics(w, http.StatusAccepted)
 			w.WriteHeader(http.StatusAccepted)
 
 			// Send error in body
@@ -912,10 +863,12 @@ func printStats() {
 	debugPrint(1, "[+] Name:        %s", ProxyName)
 	debugPrint(1, "[+] Namespace:   %s", ProxyNamespace)
 	debugPrint(1, "[+] StatefulSet: %s", ProxyStatefulSet)
-
+	if ProxyOrdinal != 0 && ProxyOrdinal != 1 {
+		return
+	}
 	go func() {
 		for {
-			time.Sleep(2 * time.Second)
+			time.Sleep(10 * time.Second)
 
 			// debugPrint(1, "[+] P:%-3v Max:%-4v Target:%-4v Deny:%-7v Active:%v ",
 			// 	proxies.Count,
@@ -923,13 +876,19 @@ func printStats() {
 			// 	int(float64(config.MaxRequests)*config.MaxLoadFactor),
 			// 	state.DenyCounter,
 			// 	state.ActiveRequests)
-			debugPrint(1, "[+] P:%-3v Received:%d 202s:%d 429s:%d EOFs:%d",
+			debugPrint(1, "[+] P:%-3v Received:%d 202s:%d 429s:%d",
 				proxies.Count,
 				NumReceived.Number,
 				Num202Response.Number,
-				Num429Received.Number,
-				SinkStatusMp.Mp["EOF"])
+				Num429Received.Number)
+
+			SinkStatusMp.Mu.Lock()
+			for k, v := range SinkStatusMp.Mp {
+				debugPrint(1, "%s: %d", k, v)
+			}
+			SinkStatusMp.Mu.Unlock()
 		}
+
 	}()
 }
 
@@ -938,11 +897,67 @@ func configClient() {
 		MaxIdleConns:        2000,             //2000
 		MaxIdleConnsPerHost: 2000,             //2000  default 2
 		MaxConnsPerHost:     1000,             //100
-		IdleConnTimeout:     time.Second * 90, //90s
+		IdleConnTimeout:     time.Minute * 5,  //90s
 		TLSHandshakeTimeout: time.Second * 10, //10s
 	}
 
 	httpClient.Transport = netHTTPTransport
+}
+
+func startRedis() {
+	redisURL := "rediss://admin:d6c91494a723e3d069a76f9b3da01f4e9515ec60c9e223bf1c9e@905adde0-58bf-4294-af03-ec301bf3d550.8117147f814b4b2ea643610826cd2046.databases.appdomain.cloud:32613"
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	pool = redis.Pool{
+		MaxIdle:     100,
+		IdleTimeout: 60 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.DialURL(redisURL, redis.DialTLSConfig(tlsConfig))
+			if err != nil {
+				log.Printf("Redis dial failed: %s", err)
+				return nil, err
+			}
+
+			log.Printf("Redis connection established.")
+			return c, err
+		},
+		MaxActive: 1000,
+		TestOnBorrow: func(c redis.Conn, t time.Time) error {
+			_, err := c.Do("PING")
+			if err != nil {
+				log.Printf("Redis TestOnBorrow() failed: %s", err)
+			}
+			return err
+		},
+		Wait: true,
+	}
+}
+
+func startSendingMetrics() {
+	c := pool.Get()
+	defer c.Close()
+
+	key202 := "202-metrics"
+	key429 := "429-metrics"
+	keyReceived := "received-events"
+	keyErrors := "proxy-errors"
+
+	if _, err := c.Do("LPUSH", key202, string(ProxyOrdinal)+":"+string(Num202Response.Number)); err != nil {
+		debugPrint(1, "errored writing 202 received %s \n", err.Error())
+	}
+	if _, err := c.Do("LPUSH", key429, string(ProxyOrdinal)+":"+string(Num429Received.Number)); err != nil {
+		debugPrint(1, "errored writing 429 received  %s \n", err.Error())
+	}
+	if _, err := c.Do("LPUSH", keyReceived, string(ProxyOrdinal)+":"+string(NumReceived.Number)); err != nil {
+		debugPrint(1, "errored writing events received %s \n", err.Error())
+	}
+
+	SinkStatusMp.Mu.Lock()
+	for k, v := range SinkStatusMp.Mp {
+		if _, err := c.Do("LPUSH", keyErrors, string(ProxyOrdinal)+":"+string(v)+":"+k); err != nil {
+			debugPrint(1, "errored writing sinks status %s \n", err.Error())
+		}
+	}
+	SinkStatusMp.Mu.Unlock()
 }
 
 func main() {
@@ -951,4 +966,5 @@ func main() {
 	printStats()
 	configClient()
 	startServer()
+	startRedis()
 }
