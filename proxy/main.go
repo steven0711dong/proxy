@@ -375,11 +375,23 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 			}
 		}
 		// Do the request
+		ima := time.Now()
 		requestResponse, requestError = httpClient.Do(proxyRequest)
 
 		// Was there no error?
 		if requestError == nil {
 			defer requestResponse.Body.Close()
+
+			for name, values := range requestResponse.Header {
+				s := make([]string, 1)
+				for _, value := range values {
+					s = append(s, value+" ,")
+				}
+				fmt.Print(name, ": ", s)
+			}
+			fmt.Println()
+			fmt.Println("-----")
+
 			// Read the body
 			if body, err := ioutil.ReadAll(requestResponse.Body); err == nil {
 				requestResponseBody = body
@@ -387,10 +399,19 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 				requestError = err
 				debugPrint(2, "[!] Failed to read request to %v response body from: %v", proxyRequest.URL.String(), requestError)
 			}
-			go func() {
+			go func(t time.Time) {
 				SinkStatusMp.Mu.Lock()
 				defer SinkStatusMp.Mu.Unlock()
 				if requestResponse != nil {
+					if requestResponse.StatusCode == 429 && time.Since(ima) > time.Duration(time.Second) {
+						if _, k := SinkStatusMp.Mp["429 after timeout"]; k {
+							SinkStatusMp.LastTime = time.Now()
+							SinkStatusMp.Mp["429 after timeout"]++
+						} else {
+							SinkStatusMp.LastTime = time.Now()
+							SinkStatusMp.Mp["429 after timeout"] = 1
+						}
+					}
 					if _, exist := SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]; exist {
 						SinkStatusMp.LastTime = time.Now()
 						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]++
@@ -407,8 +428,23 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 						SinkStatusMp.Mp["no error and empty response"] = 1
 					}
 				}
-			}()
+			}(ima)
 		} else {
+			if requestResponse != nil {
+				if requestResponse.Header != nil {
+					fmt.Println(requestError.Error())
+					for name, values := range requestResponse.Header {
+						s := make([]string, 1)
+						for _, value := range values {
+							s = append(s, value+" ,")
+						}
+						fmt.Print(name, ": ", s)
+					}
+					fmt.Println()
+				}
+				fmt.Println("-----")
+			}
+
 			errStr := requestError.Error()
 			//l := len(errStr)
 			//errS := errStr[l-13:]
