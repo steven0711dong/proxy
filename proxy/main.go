@@ -151,10 +151,6 @@ func scaleStatefulSet(newScale int) {
 		return
 	}
 
-	startSendingMetrics()
-	//location, _ := time.LoadLocation("EST")
-	//debugPrint(1, "at %s, starts scaling for: %s", time.Now().In(location).String(), string(ProxyOrdinal))
-
 	retries := 5
 	for retry := 0; retry < retries; retry++ {
 		statefulSets := kubeClient.AppsV1().StatefulSets(ProxyNamespace)
@@ -260,14 +256,13 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 		// If so, return metrics.
 		writeProxyMetrics(w, http.StatusOK)
 		return
-	} else {
-		go func() {
-			NumReceived.Mu.Lock()
-			NumReceived.Number++
-			NumReceived.LastTime = time.Now()
-			NumReceived.Mu.Unlock()
-		}()
 	}
+	go func() {
+		NumReceived.Mu.Lock()
+		NumReceived.Number++
+		NumReceived.LastTime = time.Now()
+		NumReceived.Mu.Unlock()
+	}()
 
 	// Have we fully maxed out?
 	if state.ActiveRequests >= int64(config.MaxRequests) {
@@ -392,19 +387,61 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 				requestError = err
 				debugPrint(2, "[!] Failed to read request to %v response body from: %v", proxyRequest.URL.String(), requestError)
 			}
+			go func() {
+				SinkStatusMp.Mu.Lock()
+				defer SinkStatusMp.Mu.Unlock()
+				if requestResponse != nil {
+					if _, exist := SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]; exist {
+						SinkStatusMp.LastTime = time.Now()
+						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]++
+					} else {
+						SinkStatusMp.LastTime = time.Now()
+						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)] = 1
+					}
+				} else {
+					if _, k := SinkStatusMp.Mp["no error and empty response"]; k {
+						SinkStatusMp.LastTime = time.Now()
+						SinkStatusMp.Mp["no error and empty response"]++
+					} else {
+						SinkStatusMp.LastTime = time.Now()
+						SinkStatusMp.Mp["no error and empty response"] = 1
+					}
+				}
+			}()
 		} else {
 			errStr := requestError.Error()
-			l := len(errStr)
-			errS := errStr[l-13:]
+			//l := len(errStr)
+			//errS := errStr[l-13:]
 			SinkStatusMp.Mu.Lock()
-			if _, k := SinkStatusMp.Mp[errS]; k {
+			if _, k := SinkStatusMp.Mp[errStr]; k {
 				SinkStatusMp.LastTime = time.Now()
-				SinkStatusMp.Mp[errS]++
+				SinkStatusMp.Mp[errStr]++
 			} else {
 				SinkStatusMp.LastTime = time.Now()
-				SinkStatusMp.Mp[errS] = 1
+				SinkStatusMp.Mp[errStr] = 1
 			}
 			SinkStatusMp.Mu.Unlock()
+
+			// go func() {
+			// 	if requestResponse != nil {
+			// 		if _, exist := SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]; exist {
+			// 			SinkStatusMp.LastTime = time.Now()
+			// 			SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]++
+			// 		} else {
+			// 			SinkStatusMp.LastTime = time.Now()
+			// 			SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)] = 1
+			// 		}
+			// 	} else {
+			// 		if _, k := SinkStatusMp.Mp["errored and empty response"]; k {
+			// 			SinkStatusMp.LastTime = time.Now()
+			// 			SinkStatusMp.Mp["errored and empty response"]++
+			// 		} else {
+			// 			SinkStatusMp.LastTime = time.Now()
+			// 			SinkStatusMp.Mp["errored and empty response"] = 1
+			// 		}
+			// 	}
+			// }()
+
 			debugPrint(2, "[!] Request to %v failed %v", proxyRequest.URL.String(), requestError)
 		}
 
@@ -442,69 +479,13 @@ func doAsyncProxyRequest(w http.ResponseWriter, proxyRequest *http.Request, inse
 				}
 			}
 
-			go func() {
-				SinkStatusMp.Mu.Lock()
-				defer SinkStatusMp.Mu.Unlock()
-				if requestResponse != nil {
-					if _, exist := SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]; exist {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]++
-					} else {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)] = 1
-					}
-				} else {
-					if _, k := SinkStatusMp.Mp["empty response"]; k {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp["empty response"]++
-					} else {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp["empty response"] = 1
-					}
-				}
-			}()
-
 			writeProxyMetrics(w, http.StatusOK)
 			w.WriteHeader(requestResponse.StatusCode)
 			w.Write(requestResponseBody)
 		} else {
-			//error happened
-			go func() {
-				SinkStatusMp.Mu.Lock()
-				defer SinkStatusMp.Mu.Unlock()
-				errStr := requestError.Error()
-				l := len(errStr)
-				errS := errStr[l-13:]
-				if _, ok := SinkStatusMp.Mp[errS]; ok {
-					SinkStatusMp.LastTime = time.Now()
-					SinkStatusMp.Mp[errS]++
-				} else {
-					SinkStatusMp.LastTime = time.Now()
-					SinkStatusMp.Mp[errS] = 1
-				}
-
-				if requestResponse != nil {
-					if _, exist := SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]; exist {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)]++
-					} else {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp[strconv.Itoa(requestResponse.StatusCode)] = 1
-					}
-				} else {
-					if _, k := SinkStatusMp.Mp["empty response"]; k {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp["empty response"]++
-					} else {
-						SinkStatusMp.LastTime = time.Now()
-						SinkStatusMp.Mp["empty response"] = 1
-					}
-				}
-			}()
-
 			// The request entirely failed
 			writeProxyMetrics(w, http.StatusAccepted)
-			w.WriteHeader(http.StatusAccepted)
+			w.WriteHeader(http.StatusInternalServerError)
 
 			// Send error in body
 			w.Write([]byte(requestError.Error()))
@@ -865,9 +846,7 @@ func printStats() {
 	debugPrint(1, "[+] Name:        %s", ProxyName)
 	debugPrint(1, "[+] Namespace:   %s", ProxyNamespace)
 	debugPrint(1, "[+] StatefulSet: %s", ProxyStatefulSet)
-	if ProxyOrdinal != 0 && ProxyOrdinal != 1 {
-		return
-	}
+
 	go func() {
 		for {
 			time.Sleep(10 * time.Second)
@@ -887,7 +866,7 @@ func printStats() {
 
 			SinkStatusMp.Mu.Lock()
 			for k, v := range SinkStatusMp.Mp {
-				debugPrint(1, "%s: %d", k, v)
+				debugPrint(1, "sink returned %s: %d", k, v)
 			}
 			SinkStatusMp.Mu.Unlock()
 		}
@@ -899,7 +878,7 @@ func configClient() {
 	netHTTPTransport := &http.Transport{
 		MaxIdleConns:        2000,             //2000
 		MaxIdleConnsPerHost: 2000,             //2000  default 2
-		MaxConnsPerHost:     1000,             //100
+		MaxConnsPerHost:     2000,             //100
 		IdleConnTimeout:     time.Minute * 5,  //90s
 		TLSHandshakeTimeout: time.Second * 10, //10s
 	}
@@ -907,67 +886,67 @@ func configClient() {
 	httpClient.Transport = netHTTPTransport
 }
 
-func startRedis() {
-	redisURL := "rediss://admin:d6c91494a723e3d069a76f9b3da01f4e9515ec60c9e223bf1c9e@905adde0-58bf-4294-af03-ec301bf3d550.8117147f814b4b2ea643610826cd2046.databases.appdomain.cloud:32613"
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
-	pool = redis.Pool{
-		MaxIdle:     100,
-		IdleTimeout: 60 * time.Second,
-		Dial: func() (redis.Conn, error) {
-			c, err := redis.DialURL(redisURL, redis.DialTLSConfig(tlsConfig))
-			if err != nil {
-				log.Printf("Redis dial failed: %s", err)
-				return nil, err
-			}
+// func startRedis() {
+// 	redisURL := "rediss://admin:d6c91494a723e3d069a76f9b3da01f4e9515ec60c9e223bf1c9e@905adde0-58bf-4294-af03-ec301bf3d550.8117147f814b4b2ea643610826cd2046.databases.appdomain.cloud:32613"
+// 	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+// 	pool = redis.Pool{
+// 		MaxIdle:     100,
+// 		IdleTimeout: 60 * time.Second,
+// 		Dial: func() (redis.Conn, error) {
+// 			c, err := redis.DialURL(redisURL, redis.DialTLSConfig(tlsConfig))
+// 			if err != nil {
+// 				log.Printf("Redis dial failed: %s", err)
+// 				return nil, err
+// 			}
 
-			log.Printf("Redis connection established.")
-			return c, err
-		},
-		MaxActive: 1000,
-		TestOnBorrow: func(c redis.Conn, t time.Time) error {
-			_, err := c.Do("PING")
-			if err != nil {
-				log.Printf("Redis TestOnBorrow() failed: %s", err)
-			}
-			return err
-		},
-		Wait: true,
-	}
-}
+// 			log.Printf("Redis connection established.")
+// 			return c, err
+// 		},
+// 		MaxActive: 1000,
+// 		TestOnBorrow: func(c redis.Conn, t time.Time) error {
+// 			_, err := c.Do("PING")
+// 			if err != nil {
+// 				log.Printf("Redis TestOnBorrow() failed: %s", err)
+// 			}
+// 			return err
+// 		},
+// 		Wait: true,
+// 	}
+// }
 
-func startSendingMetrics() {
-	c := pool.Get()
-	defer c.Close()
+// func startSendingMetrics() {
+// 	c := pool.Get()
+// 	defer c.Close()
 
-	key202 := "202-metrics"
-	key429 := "429-metrics"
-	keyReceived := "received-events"
-	keyErrors := "proxy-errors"
+// 	key202 := "202-metrics"
+// 	key429 := "429-metrics"
+// 	keyReceived := "received-events"
+// 	keyErrors := "proxy-errors"
 
-	if _, err := c.Do("LPUSH", key202, string(ProxyOrdinal)+":"+string(Num202Response.Number)); err != nil {
-		debugPrint(1, "errored writing 202 received %s \n", err.Error())
-	}
-	if _, err := c.Do("LPUSH", key429, string(ProxyOrdinal)+":"+string(Num429Received.Number)); err != nil {
-		debugPrint(1, "errored writing 429 received  %s \n", err.Error())
-	}
-	if _, err := c.Do("LPUSH", keyReceived, string(ProxyOrdinal)+":"+string(NumReceived.Number)); err != nil {
-		debugPrint(1, "errored writing events received %s \n", err.Error())
-	}
+// 	if _, err := c.Do("LPUSH", key202, string(ProxyOrdinal)+":"+string(Num202Response.Number)); err != nil {
+// 		debugPrint(1, "errored writing 202 received %s \n", err.Error())
+// 	}
+// 	if _, err := c.Do("LPUSH", key429, string(ProxyOrdinal)+":"+string(Num429Received.Number)); err != nil {
+// 		debugPrint(1, "errored writing 429 received  %s \n", err.Error())
+// 	}
+// 	if _, err := c.Do("LPUSH", keyReceived, string(ProxyOrdinal)+":"+string(NumReceived.Number)); err != nil {
+// 		debugPrint(1, "errored writing events received %s \n", err.Error())
+// 	}
 
-	SinkStatusMp.Mu.Lock()
-	for k, v := range SinkStatusMp.Mp {
-		if _, err := c.Do("LPUSH", keyErrors, string(ProxyOrdinal)+":"+string(v)+":"+k); err != nil {
-			debugPrint(1, "errored writing sinks status %s \n", err.Error())
-		}
-	}
-	SinkStatusMp.Mu.Unlock()
-}
+// 	SinkStatusMp.Mu.Lock()
+// 	for k, v := range SinkStatusMp.Mp {
+// 		if _, err := c.Do("LPUSH", keyErrors, string(ProxyOrdinal)+":"+string(v)+":"+k); err != nil {
+// 			debugPrint(1, "errored writing sinks status %s \n", err.Error())
+// 		}
+// 	}
+// 	SinkStatusMp.Mu.Unlock()
+// }
 
 func main() {
 	startWatcher()
 	setupIdleShutdown()
 	printStats()
 	configClient()
-	startRedis()
+	//startRedis()
 	startServer()
 }
